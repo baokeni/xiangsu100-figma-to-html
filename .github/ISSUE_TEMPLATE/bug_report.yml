@@ -1,0 +1,36 @@
+name: 还原问题反馈
+description: 提交脱敏的最小复现，便于维护同一个Skill
+title: '[还原问题] '
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Skill版本、客户端和系统
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: 出现问题的打开方式
+      options:
+        - 单文件直接打开
+        - 客户端内嵌预览
+        - 解压后的目录包
+        - 本地服务器
+        - 其他
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: 最小复现、预期与实际结果
+      description: 提供经脱敏的步骤、检查记录或局部截图；附视口/DPR。不要提供私有Figma标识、字体文件、凭据或个人聊天。
+    validations:
+      required: true
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: 分享范围
+      options:
+        - label: 已去除私有设计标识、聊天、凭据与未授权素材或字体
+          required: true
