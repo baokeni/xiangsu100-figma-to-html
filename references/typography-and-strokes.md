@@ -36,7 +36,7 @@ python3 scripts/inspect_fonts.py --project ./project --family DIN --family 'Ping
 
 确认文件和截图的色彩空间，尤其Display P3。只在来源确实为P3时映射原生CSS；已经转换的素材不能再次转换。比较带ICC的原稿和无ICC的浏览器PNG前，统一到同一空间并记录假设。
 
-`compare_screenshots.py`默认把无ICC图像标为“假定sRGB”；无法确认时使用`--untagged reject`，先查明来源。脚本拒绝自动缩放不同尺寸的图像。
+`compare_screenshots.py`默认把无ICC图像标为“假定sRGB”；无法确认时使用`--untagged reject`，先查明来源。脚本拒绝自动缩放不同尺寸的图像。含透明度时需提供明确的共同sRGB背景；先保留alpha并转换色彩再合成，不能把隐藏RGB当可见差异。复杂P3合成仍需同背景参考，详见验证说明。
 
 渐变不仅核对端点色值，还需检查停靠点、透明度、几何变换与插值空间。CSS未明确指定插值空间时，渲染结果可能与设计源不同；用当前浏览器支持的显式插值设置做受控对照，保持其他参数不变，再根据证据选择。文件为P3不等于所有素材都必须再次转P3，也不把单次页面的选项设为所有项目通用规则。读取可用的原始精度，不先把颜色强制取整为8位再反推CSS。
 

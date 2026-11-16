@@ -81,7 +81,12 @@ class Bundler(HTMLParser):
         return ''.join(' ' + key + ('' if value is None else '="' + escape(value, quote=True) + '"') for key, value in attrs.items())
 
     def script(self, text):
-        return '<script>' + text.replace('</script', '<\\/script') + '</script>'
+        # Escaping a slash changes tagged-template raw values. Encode the whole
+        # classic script instead when HTML could interpret an end delimiter.
+        if re.search(r'</script', text, flags=re.I):
+            encoded = base64.b64encode(text.encode('utf-8')).decode('ascii')
+            return '<script src="data:text/javascript;charset=utf-8;base64,' + encoded + '"></script>'
+        return '<script>' + text + '</script>'
 
     def handle_starttag(self, tag, attrs):
         values = dict(attrs)

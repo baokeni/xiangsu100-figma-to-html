@@ -5,10 +5,14 @@ import path from 'node:path';
 import os from 'node:os';
 import {pathToFileURL,fileURLToPath} from 'node:url';
 import {createRequire} from 'node:module';
+import {createHash} from 'node:crypto';
+import {validateConfig} from './check_config.mjs';
+import {inspectVisibleState} from './visible_state.mjs';
 
 function args(argv) {
   const out={mode:'standalone',dpr:1};
-  for(let i=0;i<argv.length;i+=2){if(!argv[i].startsWith('--')||argv[i+1]===undefined)throw new Error('Use --option value');out[argv[i].slice(2)]=argv[i+1];}
+  const allowed=['html','reference','width','height','out','mode','dpr','project','config'];
+  for(let i=0;i<argv.length;i+=2){if(!argv[i].startsWith('--')||argv[i+1]===undefined)throw new Error('Use --option value');const key=argv[i].slice(2);if(!allowed.includes(key))throw new Error('Unknown option --'+key);out[key]=argv[i+1];}
   for(const key of ['html','reference','width','height','out'])if(!out[key])throw new Error('Missing --'+key);
   for(const key of ['width','height','dpr']){out[key]=Number(out[key]);if(!Number.isFinite(out[key])||out[key]<=0)throw new Error('Invalid '+key);}
   if(!Number.isInteger(out.width)||!Number.isInteger(out.height))throw new Error('Viewport width/height must be integers');
@@ -20,13 +24,21 @@ export async function run(options) {
   const html=path.resolve(options.html),out=path.resolve(options.out),reference=path.resolve(options.reference);
   if(out===path.dirname(html))throw new Error('Use a dedicated verification output directory');
   await fs.access(html);await fs.access(reference);await fs.mkdir(out,{recursive:true});
-  const config=options.config?JSON.parse(await fs.readFile(options.config,'utf8')):{};
+  let config;
+  try{config=validateConfig(options.config?JSON.parse(await fs.readFile(options.config,'utf8')):{});}
+  catch(error){const blocked={status:'blocked',visualReview:'pending',requiresVisualReview:true,failures:[{kind:'configuration',error:String(error)}]};await fs.writeFile(path.join(out,'automated-report.json'),JSON.stringify(blocked,null,2));return blocked;}
   let playwright;
   try{const req=createRequire(path.join(path.resolve(options.project??path.dirname(html)),'package.json'));playwright=req('playwright');}
   catch{try{playwright=createRequire(import.meta.url)('playwright');}catch{throw new Error('Install playwright in the project; the skill does not install dependencies automatically');}}
   const profile=await fs.mkdtemp(path.join(os.tmpdir(),'figma-html-check-'));
   const report={status:'running',mode:options.mode,viewport:{width:options.width,height:options.height},dpr:options.dpr,captureMode:config.captureFullPage?'full-page':'viewport',
-    sourceReference:path.basename(reference),requiresVisualReview:true,visualReview:'pending',checks:[],failures:[],requests:[],fontChecks:[],interactions:[]};
+    sourceReference:path.basename(reference),requiresVisualReview:true,visualReview:'pending',checks:[],failures:[],requests:[],fontChecks:[],interactions:[],
+    coverage:{fonts:config.fonts?.length?'configured':'not_configured',interactions:config.interactions?.length?'configured':'not_configured',visualReview:'pending',scope:'configured checks only; not design acceptance'},warnings:[],
+    sourceSnapshot:{htmlSHA256:createHash('sha256').update(await fs.readFile(html)).digest('hex'),referenceSHA256:createHash('sha256').update(await fs.readFile(reference)).digest('hex'),note:'HTML/reference hashes do not cover external folder dependencies'}};
+  for(const key of ['fonts','interactions'])if(report.coverage[key]==='not_configured')report.warnings.push(key+' checks are not configured');
+  const expectations=(config.interactions??[]).flatMap(action=>Array.isArray(action.expect)?action.expect:[action.expect]);
+  report.coverage.stateAssertions={attributes:expectations.reduce((n,item)=>n+Object.keys(item.attributes??{}).length,0),css:expectations.reduce((n,item)=>n+Object.keys(item.css??{}).length,0),counts:expectations.filter(item=>item.count!==undefined).length,visibleTextOrElements:expectations.filter(item=>item.fullyVisible===true||(item.text!==undefined&&item.fullyVisible!==false)).length,dataOnlyOptOuts:expectations.filter(item=>item.fullyVisible===false).length};
+  if(report.coverage.stateAssertions.dataOnlyOptOuts)report.warnings.push('Some expectations explicitly skip visual text/geometry checks (fullyVisible:false)');
   let context;
   try {
     context=await playwright.chromium.launchPersistentContext(profile,{
@@ -82,7 +94,7 @@ export async function run(options) {
           const found=await cdp.send('DOM.querySelectorAll',{nodeId:dom.root.nodeId,selector:expected.selector});
           if(found.nodeIds.length!==1){report.failures.push({scenario,kind:'font-selector-not-unique',selector:expected.selector});continue;}
           const actual=(await cdp.send('CSS.getPlatformFontsForNode',{nodeId:found.nodeIds[0]})).fonts;
-          const matches=actual.filter(f=>(!expected.postScriptName||f.postScriptName===expected.postScriptName)&&(!expected.familyName||f.familyName===expected.familyName)&&(!expected.custom||f.isCustomFont));
+          const matches=actual.filter(f=>(!expected.postScriptName||f.postScriptName===expected.postScriptName)&&(!expected.familyName||f.familyName===expected.familyName)&&(expected.custom===undefined||f.isCustomFont===expected.custom));
           const ok=actual.length>0&&(expected.allowFallback?matches.length>0:matches.length===actual.length);
           report.fontChecks.push({scenario,selector:expected.selector,expected,actual,ok});
           if(!ok)report.failures.push({scenario,kind:'font-mismatch',selector:expected.selector});
@@ -92,22 +104,49 @@ export async function run(options) {
     async function expectState(page, expected, timeout=5000) {
       if(!expected||!['selector','urlHash','urlIncludes'].some(key=>expected[key]!==undefined))throw new Error('Each step needs an observable expectation');
       const target=expected.selector?page.locator(expected.selector):null;
-      if(target){
+      if(target&&expected.count===undefined){
         await target.waitFor({state:expected.visible===false?'hidden':'visible',timeout});
         if(expected.visible===false&&['text','disabled','scrollTop','scrollLeft'].some(key=>expected[key]!==undefined))throw new Error('Hidden expectation cannot assert visible state properties');
-      }else if(['visible','text','disabled','scrollTop','scrollLeft'].some(key=>expected[key]!==undefined))throw new Error('Element expectations need a selector');
+      }else if(!target&&['visible','text','disabled','scrollTop','scrollLeft'].some(key=>expected[key]!==undefined))throw new Error('Element expectations need a selector');
       const deadline=Date.now()+timeout;
+      let details;
       do{
-        const elementMatches=!target||expected.visible===false||(
+        const count=target?await target.count():null;
+        const countMatches=!target||(expected.count===undefined?count===1||expected.visible===false:count===expected.count);
+        const onlyCount=expected.count!==undefined&&!['visible','text','disabled','scrollTop','scrollLeft','attributes','css','fullyVisible'].some(key=>expected[key]!==undefined);
+        let elementMatches=!target||expected.visible===false||onlyCount||(count===1&&(
           (expected.text===undefined||(await target.textContent())?.trim()===String(expected.text))&&
           (expected.disabled===undefined||await target.isDisabled()===expected.disabled)&&
           (expected.scrollTop===undefined||Math.abs(await target.evaluate(el=>el.scrollTop)-expected.scrollTop)<=1)&&
-          (expected.scrollLeft===undefined||Math.abs(await target.evaluate(el=>el.scrollLeft)-expected.scrollLeft)<=1));
+          (expected.scrollLeft===undefined||Math.abs(await target.evaluate(el=>el.scrollLeft)-expected.scrollLeft)<=1)));
+        if(target&&count===1&&expected.visible!==false&&!onlyCount){
+          if(!await target.isVisible())elementMatches=false;
+          const state=await target.evaluate((el,wanted)=>{
+            const attributes={};for(const key of Object.keys(wanted.attributes??{}))attributes[key]=el.getAttribute(key);
+            const css={},normalized={};
+            for(const [key,value]of Object.entries(wanted.css??{})){
+              const property=key.startsWith('--')?key:key.replace(/[A-Z]/g,char=>'-'+char.toLowerCase());
+              if(!CSS.supports(property,value))throw new Error('Unsupported CSS expectation: '+key+'='+value);
+              css[key]=getComputedStyle(el).getPropertyValue(property).trim();
+              // Normalize literal colors/units in the same parent; do not load expected URLs.
+              if(/url\(/i.test(value)||property.startsWith('--'))normalized[key]=value.trim();
+              else if(['display','position','visibility'].includes(property))normalized[key]=value.trim();
+              else{const probe=document.createElement('span');probe.style.cssText='all:initial!important;position:fixed!important;display:none!important;pointer-events:none!important';probe.style.setProperty('color',getComputedStyle(el).color,'important');probe.style.setProperty('font-size',getComputedStyle(el).fontSize,'important');probe.style.setProperty(property,value,'important');el.parentElement.append(probe);normalized[key]=getComputedStyle(probe).getPropertyValue(property).trim();probe.remove();}
+            }
+            return {attributes,css,normalized};
+          },expected);
+          if(Object.entries(expected.attributes??{}).some(([key,value])=>state.attributes[key]!==value))elementMatches=false;
+          if(Object.keys(expected.css??{}).some(key=>state.css[key]!==state.normalized[key]))elementMatches=false;
+          const visual=(expected.fullyVisible===true||(expected.text!==undefined&&expected.fullyVisible!==false))?await target.evaluate(inspectVisibleState,{wholeElement:expected.fullyVisible===true}):null;
+          if(visual&&!visual.ok)elementMatches=false;
+          details={...state,visual};
+        }
+        if(target&&expected.visible===false&&count>0)elementMatches=count===1&&await target.isHidden();
         const url=new URL(page.url());
-        if(elementMatches&&(expected.urlHash===undefined||url.hash===expected.urlHash)&&(expected.urlIncludes===undefined||page.url().includes(expected.urlIncludes)))return;
+        if(countMatches&&elementMatches&&(expected.urlHash===undefined||url.hash===expected.urlHash)&&(expected.urlIncludes===undefined||page.url().includes(expected.urlIncludes)))return;
         await new Promise(resolve=>setTimeout(resolve,50));
       }while(Date.now()<deadline);
-      const actual={urlHash:new URL(page.url()).hash,...(target&&expected.visible!==false?{text:(await target.textContent())?.trim(),disabled:await target.isDisabled(),scroll:await target.evaluate(el=>({top:el.scrollTop,left:el.scrollLeft}))}:{})};
+      const actual={urlHash:new URL(page.url()).hash,count:target?await target.count():null,details,...(target&&await target.count()===1&&expected.visible!==false?{text:(await target.textContent())?.trim(),disabled:await target.isDisabled(),scroll:await target.evaluate(el=>({top:el.scrollTop,left:el.scrollLeft}))}:{})};
       throw new Error('Expected state differs: '+JSON.stringify({expected,actual}));
     }
     async function journey(page, scenario) {
@@ -168,6 +207,6 @@ export async function run(options) {
 }
 
 if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)){
-  try{const options=args(process.argv.slice(2));const report=await run(options);console.log(JSON.stringify({status:report.status,requiresVisualReview:report.requiresVisualReview,failures:report.failures},null,2));process.exitCode=report.status==='automated_checks_passed'?0:1;}
+  try{const options=args(process.argv.slice(2));const report=await run(options);console.log(JSON.stringify({status:report.status,requiresVisualReview:report.requiresVisualReview,coverage:report.coverage,warnings:report.warnings,failures:report.failures},null,2));process.exitCode=report.status==='automated_checks_passed'?0:1;}
   catch(error){console.error(String(error));process.exitCode=1;}
 }
