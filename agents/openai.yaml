@@ -1,5 +1,5 @@
 interface:
-  display_name: "像素100 · Figma 还原 HTML"
+  display_name: "Xiangsu100 · Figma to HTML"
   short_description: "先明确设计依据与改动范围，再还原 Figma 页面/链路，完成素材、字体、状态与截图检查"
   default_prompt: "使用 $xiangsu100-figma-to-html，先明确这个 Figma Frame、Section 或链路的设计依据、改动范围与验收期望，再还原 HTML，完成素材、实际字体、交互状态和同尺寸截图对照后交付。"
 policy:

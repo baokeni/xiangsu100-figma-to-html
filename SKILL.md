@@ -7,7 +7,7 @@ metadata:
   source: https://github.com/baokeni/xiangsu100-figma-to-html
 ---
 
-# 像素100 · Figma 还原 HTML
+# Xiangsu100 · Figma to HTML
 
 保留设计与用户约定，输出能打开、能操作、可复查的HTML。自动检查、AI视觉复查和用户验收分别记录；不承诺未经证明的1:1。
 

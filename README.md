@@ -1,4 +1,4 @@
-# 像素100 · Figma还原HTML
+# Xiangsu100 · Figma to HTML
 
 **v0.3.0。** 仓库默认分支与Release安装包可能不是同一版本，安装后请核对SKILL.md的metadata.version；课堂固定版本使用对应Release的ZIP。发布状态以GitHub页面为准。
 
