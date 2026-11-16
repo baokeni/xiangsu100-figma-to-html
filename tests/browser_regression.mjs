@@ -37,5 +37,47 @@ try{
   const grid=await run({...common,dpr:2,html:path.join(root,'standalone.html'),out:path.join(root,'grid')});assert.equal(grid.status,'failed');assert(grid.failures.some(f=>f.kind==='pixel-grid-mismatch'));
   config.interactions[0].expect.text='Claim';config.interactions[0].timeoutMs=100;await fs.writeFile(path.join(root,'checks.json'),JSON.stringify(config));
   const text=await run({...common,html:path.join(root,'standalone.html'),out:path.join(root,'exact-text')});assert.equal(text.status,'failed');assert(text.failures.some(f=>f.kind==='interaction'));
-  console.log(JSON.stringify({syntheticRegression:'passed',cases:['portable bundle and deferred interaction','relative-image failure detected','actual fallback font detected','DPR/reference pixel-grid mismatch detected','substring does not pass exact state assertion'],visualAcceptance:'not_performed'}));
+  // Multi-state path: scroll, overlay close/apply, route, return with state preserved.
+  const flowHTML=`<!doctype html><meta charset="utf-8"><style>
+  body{margin:0;font:16px Arial}[hidden]{display:none!important}#results{height:200px;overflow:auto}#content{height:800px}#details{margin-top:160px}#panel{position:fixed;inset:100px 10px;background:white;border:1px solid}
+  </style><section id="list"><button id="open">Filter</button><span id="badge">All</span><div id="results"><div id="content"><button id="details">Details</button></div></div></section>
+  <section id="detail" hidden><h1 id="detail-title">Detail</h1><button id="back">Back</button><div id="late"></div></section>
+  <div id="panel" hidden><button id="cancel">Cancel</button><button id="apply">Apply</button></div>
+  <script>
+  const byId=id=>document.getElementById(id);
+  function route(){const detail=location.hash==='#detail';byId('list').hidden=detail;byId('detail').hidden=!detail;}
+  if(!location.hash)location.hash='list';route();addEventListener('hashchange',route);
+  byId('open').onclick=()=>byId('panel').hidden=false;
+  byId('cancel').onclick=()=>byId('panel').hidden=true;
+  byId('apply').onclick=()=>{byId('panel').hidden=true;byId('badge').textContent='Applied';};
+  byId('details').onclick=()=>{location.hash='detail';};
+  byId('back').onclick=()=>{location.hash='list';};
+  </script>`;
+  await fs.writeFile(path.join(root,'flow.html'),flowHTML);
+  const steps=[
+    {name:'scroll list',action:'scroll',selector:'#results',top:120,expect:{selector:'#results',scrollTop:120},checkpoint:{name:'list-scroll',reference:'reference.png'}},
+    {name:'open overlay',action:'click',selector:'#open',expect:{selector:'#panel'},checkpoint:{name:'filter'}},
+    {name:'cancel overlay',action:'click',selector:'#cancel',expect:{selector:'#panel',visible:false}},
+    {name:'reopen overlay',action:'click',selector:'#open',expect:{selector:'#panel'}},
+    {name:'apply filter',action:'click',selector:'#apply',expect:[{selector:'#panel',visible:false},{selector:'#badge',text:'Applied'}]},
+    {name:'navigate detail',action:'click',selector:'#details',expect:{selector:'#detail-title',text:'Detail',urlHash:'#detail'},checkpoint:{name:'detail'}},
+    {name:'return with scroll and filter',action:'click',selector:'#back',expect:[{selector:'#results',scrollTop:120,urlHash:'#list'},{selector:'#badge',text:'Applied'}],checkpoint:{name:'return'}}
+  ];
+  config.interactions=steps;await fs.writeFile(path.join(root,'checks.json'),JSON.stringify(config));
+  const flow=await run({...common,html:path.join(root,'flow.html'),out:path.join(root,'flow')});assert.equal(flow.status,'automated_checks_passed',JSON.stringify(flow.failures));
+  assert.equal(flow.interactions.length,21);assert.equal(flow.checks.filter(x=>x.checkpoint).length,12);
+  for(const scenario of ['local-file','no-base-preview','isolated-file'])assert(flow.interactions.some(x=>x.scenario===scenario&&x.name==='return with scroll and filter'&&x.ok));
+  config.interactions=steps.map(x=>({...x,timeoutMs:200}));config.interactions[6].expect=[{selector:'#badge',text:'Lost filter'}];
+  await fs.writeFile(path.join(root,'checks.json'),JSON.stringify(config));
+  const badBack=await run({...common,html:path.join(root,'flow.html'),out:path.join(root,'bad-back')});assert.equal(badBack.status,'failed');assert(badBack.interactions.some(x=>x.name==='return with scroll and filter'&&!x.ok));
+  // A resource loaded only after a transition must not hide behind a healthy initial page.
+  config.interactions=steps;await fs.writeFile(path.join(root,'checks.json'),JSON.stringify(config));
+  await fs.writeFile(path.join(root,'late.html'),flowHTML.replace("location.hash='detail';};", "location.hash='detail';byId('late').innerHTML='<img src=missing-late.png>';};"));
+  const late=await run({...common,html:path.join(root,'late.html'),out:path.join(root,'late')});assert.equal(late.status,'failed');assert(late.failures.some(x=>x.scenario.includes('step-6')&&x.kind==='broken-image'));
+  // Directory links work locally but cannot qualify as a portable single HTML file.
+  await fs.writeFile(path.join(root,'linked.html'),'<a id="next" href="detail.html">Next</a>');
+  await fs.writeFile(path.join(root,'detail.html'),'<h1 id="linked-title">Linked detail</h1>');
+  config.interactions=[{action:'click',selector:'#next',timeoutMs:200,expect:{selector:'#linked-title',text:'Linked detail'}}];await fs.writeFile(path.join(root,'checks.json'),JSON.stringify(config));
+  const linked=await run({...common,html:path.join(root,'linked.html'),out:path.join(root,'linked')});assert.notEqual(linked.status,'automated_checks_passed');assert(linked.interactions.some(x=>x.scenario==='local-file'&&x.ok));assert(linked.interactions.some(x=>x.scenario!=='local-file'&&!x.ok));
+  console.log(JSON.stringify({syntheticRegression:'passed',cases:['portable bundle and deferred interaction','relative-image failure detected','actual fallback font detected','DPR/reference pixel-grid mismatch detected','substring does not pass exact state assertion','7-step flow replayed in 3 opening modes with checkpoints','wrong return state detected','transition-only broken image detected','linked pages rejected as single-file delivery'],visualAcceptance:'not_performed'}));
 }finally{await fs.rm(root,{recursive:true,force:true});}

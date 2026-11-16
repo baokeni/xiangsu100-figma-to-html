@@ -38,6 +38,12 @@ python3 scripts/inspect_fonts.py --project ./project --family DIN --family 'Ping
 
 `compare_screenshots.py`默认把无ICC图像标为“假定sRGB”；无法确认时使用`--untagged reject`，先查明来源。脚本拒绝自动缩放不同尺寸的图像。
 
+渐变不仅核对端点色值，还需检查停靠点、透明度、几何变换与插值空间。CSS未明确指定插值空间时，渲染结果可能与设计源不同；用当前浏览器支持的显式插值设置做受控对照，保持其他参数不变，再根据证据选择。文件为P3不等于所有素材都必须再次转P3，也不把单次页面的选项设为所有项目通用规则。读取可用的原始精度，不先把颜色强制取整为8位再反推CSS。
+
+复杂模糊/混合SVG有已确认色差时，按[素材复用流程](assets-and-portability.md)比较原SVG与原始透明栅格导出。不要整体增饱和掩盖局部合成差异。
+
+原稿为P3、截图为sRGB时，同时保留原始带配置文件的原图与统一空间的诊断。可增加“原图 + 实时HTML”的同视口对照，帮助区分截图转换与实际页面；仍不能宣称已验证所有显示设备。若归因于栅格化、量化或显示管线，须区分已证实原因与待验证推测。
+
 CSS视口与DPR共同确定物理像素网格。报告视口、DPR与缩放；不要拿DPR2截图直接和1倍图逐像素比较，再把差异称实现错误。
 
-来源：[字体加载](https://developer.mozilla.org/en-US/docs/Web/CSS/Reference/At-rules/@font-face)、[设备像素比](https://developer.mozilla.org/en-US/docs/Web/API/Window/devicePixelRatio)。
+来源：[渐变插值空间](https://developer.mozilla.org/en-US/docs/Web/CSS/Reference/Values/color-interpolation-method)、[字体加载](https://developer.mozilla.org/en-US/docs/Web/CSS/Reference/At-rules/@font-face)、[设备像素比](https://developer.mozilla.org/en-US/docs/Web/API/Window/devicePixelRatio)。

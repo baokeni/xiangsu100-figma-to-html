@@ -41,7 +41,9 @@ export async function run(options) {
       const onResponse=response=>{if(response.status()>=400)failures.push({kind:'http',status:response.status(),resource:response.url().split('?')[0]});};
       const onRequest=request=>{if(/^https?:/i.test(request.url()))requests.push({type:request.resourceType(),url:request.url().split('?')[0]});};
       page.on('requestfailed',onFailed);page.on('pageerror',onError);page.on('response',onResponse);page.on('request',onRequest);
+      let finished;
       return {async finish(){
+        if(finished)return finished;
         await page.evaluate(async()=>{
           await document.fonts.ready;
           await Promise.all([...document.images].map(img=>Promise.race([img.decode().catch(()=>{}),new Promise(resolve=>setTimeout(resolve,5000))])));
@@ -59,62 +61,103 @@ export async function run(options) {
         page.off('requestfailed',onFailed);page.off('pageerror',onError);page.off('response',onResponse);page.off('request',onRequest);
         report.requests.push(...requests.map(x=>({scenario:label,...x})));report.failures.push(...failures.map(x=>({scenario:label,...x})));
         report.checks.push({scenario:label,imageCount:evidence.images.length,brokenImages:evidence.images.filter(i=>!i.loaded).length});
-        return evidence;
+        finished=evidence;return evidence;
       }};
+    }
+    async function checkGrid(render, source, label) {
+      const a=await fs.readFile(source),b=await fs.readFile(render),signature=Buffer.from([137,80,78,71,13,10,26,10]);
+      if(a.length>=24&&a.subarray(0,8).equals(signature)){
+        const grids={reference:[a.readUInt32BE(16),a.readUInt32BE(20)],render:[b.readUInt32BE(16),b.readUInt32BE(20)]};
+        report.checks.push({scenario:label,pixelGrids:grids});
+        if(JSON.stringify(grids.reference)!==JSON.stringify(grids.render))report.failures.push({scenario:label,kind:'pixel-grid-mismatch',...grids});
+      }else report.checks.push({scenario:label,status:'needs_comparison_helper',note:'Use compare_screenshots.py to check non-PNG dimensions'});
+    }
+    async function checkFonts(page, expectations, scenario) {
+      if(!expectations?.length){report.checks.push({scenario,check:'actual-fonts',status:'not_configured'});return;}
+      const cdp=await context.newCDPSession(page);
+      try{
+        await cdp.send('DOM.enable');await cdp.send('CSS.enable');const dom=await cdp.send('DOM.getDocument');
+        for(const expected of expectations){
+          if(!expected.postScriptName&&!expected.familyName)throw new Error('Each font expectation needs postScriptName or familyName');
+          const found=await cdp.send('DOM.querySelectorAll',{nodeId:dom.root.nodeId,selector:expected.selector});
+          if(found.nodeIds.length!==1){report.failures.push({scenario,kind:'font-selector-not-unique',selector:expected.selector});continue;}
+          const actual=(await cdp.send('CSS.getPlatformFontsForNode',{nodeId:found.nodeIds[0]})).fonts;
+          const matches=actual.filter(f=>(!expected.postScriptName||f.postScriptName===expected.postScriptName)&&(!expected.familyName||f.familyName===expected.familyName)&&(!expected.custom||f.isCustomFont));
+          const ok=actual.length>0&&(expected.allowFallback?matches.length>0:matches.length===actual.length);
+          report.fontChecks.push({scenario,selector:expected.selector,expected,actual,ok});
+          if(!ok)report.failures.push({scenario,kind:'font-mismatch',selector:expected.selector});
+        }
+      }finally{await cdp.detach();}
+    }
+    async function expectState(page, expected, timeout=5000) {
+      if(!expected||!['selector','urlHash','urlIncludes'].some(key=>expected[key]!==undefined))throw new Error('Each step needs an observable expectation');
+      const target=expected.selector?page.locator(expected.selector):null;
+      if(target){
+        await target.waitFor({state:expected.visible===false?'hidden':'visible',timeout});
+        if(expected.visible===false&&['text','disabled','scrollTop','scrollLeft'].some(key=>expected[key]!==undefined))throw new Error('Hidden expectation cannot assert visible state properties');
+      }else if(['visible','text','disabled','scrollTop','scrollLeft'].some(key=>expected[key]!==undefined))throw new Error('Element expectations need a selector');
+      const deadline=Date.now()+timeout;
+      do{
+        const elementMatches=!target||expected.visible===false||(
+          (expected.text===undefined||(await target.textContent())?.trim()===String(expected.text))&&
+          (expected.disabled===undefined||await target.isDisabled()===expected.disabled)&&
+          (expected.scrollTop===undefined||Math.abs(await target.evaluate(el=>el.scrollTop)-expected.scrollTop)<=1)&&
+          (expected.scrollLeft===undefined||Math.abs(await target.evaluate(el=>el.scrollLeft)-expected.scrollLeft)<=1));
+        const url=new URL(page.url());
+        if(elementMatches&&(expected.urlHash===undefined||url.hash===expected.urlHash)&&(expected.urlIncludes===undefined||page.url().includes(expected.urlIncludes)))return;
+        await new Promise(resolve=>setTimeout(resolve,50));
+      }while(Date.now()<deadline);
+      const actual={urlHash:new URL(page.url()).hash,...(target&&expected.visible!==false?{text:(await target.textContent())?.trim(),disabled:await target.isDisabled(),scroll:await target.evaluate(el=>({top:el.scrollTop,left:el.scrollLeft}))}:{})};
+      throw new Error('Expected state differs: '+JSON.stringify({expected,actual}));
+    }
+    async function journey(page, scenario) {
+      const actions=config.interactions??[];
+      if(!actions.length)report.checks.push({scenario,check:'interactions',status:'not_configured'});
+      for(const [index,action] of actions.entries()){
+        const label=`${scenario}-step-${index+1}`,check=await inspect(page,label);
+        let failed=false;
+        try{
+          const locator=page.locator(action.selector);
+          if(action.action==='click')await locator.click({timeout:action.timeoutMs??5000});
+          else if(action.action==='press')await locator.press(action.key,{timeout:action.timeoutMs??5000});
+          else if(action.action==='scroll')await locator.evaluate((el,position)=>el.scrollTo(position),{top:action.top??0,left:action.left??0,behavior:'instant'});
+          else throw new Error('Supported actions: click, press, scroll');
+          const expected=Array.isArray(action.expect)?action.expect:[action.expect];
+          for(const state of expected)await expectState(page,state,action.timeoutMs??5000);
+          await check.finish();
+          if(action.fonts)await checkFonts(page,action.fonts,label);
+          if(action.checkpoint){
+            const name=action.checkpoint.name;
+            if(!/^[a-zA-Z0-9_-]+$/.test(name??''))throw new Error('Checkpoint name must use letters, numbers, _ or -');
+            const file=label+'-'+name+'.png';await page.screenshot({path:path.join(out,file),fullPage:config.captureFullPage??false,animations:'disabled'});
+            const source=action.checkpoint.reference?path.resolve(path.dirname(path.resolve(options.config)),action.checkpoint.reference):null;
+            if(source)await checkGrid(path.join(out,file),source,label);
+            report.checks.push({scenario:label,checkpoint:file,sourceReference:source?path.basename(source):null,visualReview:'pending'});
+          }
+          report.interactions.push({scenario,name:action.name??action.selector,ok:true});
+        }catch(error){
+          failed=true;report.interactions.push({scenario,name:action.name??action.selector,ok:false,error:String(error)});
+          report.failures.push({scenario,kind:'interaction',name:action.name??action.selector,error:String(error)});
+        }finally{await check.finish();}
+        // A failed step invalidates the rest of this path; do not report later states as visited.
+        if(failed)break;
+      }
     }
     const page=context.pages()[0];let check=await inspect(page,'local-file');
     await page.goto(pathToFileURL(html).href,{waitUntil:'load'});await check.finish();
     await page.screenshot({path:path.join(out,'render.png'),fullPage:config.captureFullPage??false,animations:'disabled'});
-    const refBytes=await fs.readFile(reference),renderBytes=await fs.readFile(path.join(out,'render.png'));
-    if(refBytes.subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10]))){
-      report.pixelGrids={reference:[refBytes.readUInt32BE(16),refBytes.readUInt32BE(20)],render:[renderBytes.readUInt32BE(16),renderBytes.readUInt32BE(20)]};
-      if(JSON.stringify(report.pixelGrids.reference)!==JSON.stringify(report.pixelGrids.render))report.failures.push({kind:'pixel-grid-mismatch',...report.pixelGrids});
-    }else report.checks.push({scenario:'reference-grid',status:'needs_comparison_helper',note:'PNG metadata not available; compare_screenshots.py must check dimensions'});
-    // Reading declarations alone is not proof of the rendered font.
-    if(config.fonts?.length){
-      const cdp=await context.newCDPSession(page);await cdp.send('DOM.enable');await cdp.send('CSS.enable');const dom=await cdp.send('DOM.getDocument');
-      for(const expected of config.fonts){
-        if(!expected.postScriptName&&!expected.familyName)throw new Error('Each font expectation needs postScriptName or familyName');
-        const found=await cdp.send('DOM.querySelector',{nodeId:dom.root.nodeId,selector:expected.selector});
-        if(!found.nodeId){report.failures.push({kind:'font-selector-missing',selector:expected.selector});continue;}
-        const actual=(await cdp.send('CSS.getPlatformFontsForNode',{nodeId:found.nodeId})).fonts;
-        const matches=actual.filter(f=>(!expected.postScriptName||f.postScriptName===expected.postScriptName)&&(!expected.familyName||f.familyName===expected.familyName)&&(!expected.custom||f.isCustomFont));
-        const ok=actual.length>0&&(expected.allowFallback?matches.length>0:matches.length===actual.length);report.fontChecks.push({selector:expected.selector,expected,actual,ok});
-        if(!ok)report.failures.push({kind:'font-mismatch',selector:expected.selector});
-      }
-      await cdp.detach();
-    }else report.checks.push({scenario:'actual-fonts',status:'not_configured',note:'Inspect computed and actual fonts manually; fonts.loaded is not enough'});
-    const dynamicError=error=>report.failures.push({kind:'interaction-javascript',error:String(error)});
-    const dynamicResource=request=>report.failures.push({kind:'interaction-resource',resource:request.url().split('?')[0],error:request.failure()?.errorText});
-    page.on('pageerror',dynamicError);page.on('requestfailed',dynamicResource);
-    for(const action of config.interactions??[]){
-      try{
-        const locator=page.locator(action.selector);
-        if(action.action==='click')await locator.click();
-        else if(action.action==='press')await locator.press(action.key);
-        else throw new Error('Supported actions: click, press');
-        const target=page.locator(action.expect.selector);
-        await target.waitFor({state:'visible',timeout:action.timeoutMs??5000});
-        const deadline=Date.now()+(action.timeoutMs??5000);let matched=false;
-        do{
-          const textMatches=action.expect.text===undefined||(await target.textContent())?.trim()===String(action.expect.text);
-          const disabledMatches=action.expect.disabled===undefined||await target.isDisabled()===action.expect.disabled;
-          if(textMatches&&disabledMatches){matched=true;break;}
-          await new Promise(resolve=>setTimeout(resolve,50));
-        }while(Date.now()<deadline);
-        if(!matched)throw new Error('Expected exact text or disabled state differs');
-        report.interactions.push({name:action.name??action.selector,ok:true});
-      }catch(error){report.interactions.push({name:action.name??action.selector,ok:false,error:String(error)});report.failures.push({kind:'interaction',name:action.name??action.selector,error:String(error)});}
-    }
-    page.off('pageerror',dynamicError);page.off('requestfailed',dynamicResource);
+    await checkGrid(path.join(out,'render.png'),reference,'initial-grid');
+    await checkFonts(page,config.fonts,'local-file');await journey(page,'local-file');
     if(options.mode==='standalone'){
       const source=await fs.readFile(html,'utf8'),preview=await context.newPage();
-      // New about:blank document intentionally has no useful directory base.
+      // New about:blank intentionally has no useful directory base; replay the full configured path.
       check=await inspect(preview,'no-base-preview');await preview.setContent(source,{waitUntil:'load'});await check.finish();
+      await checkFonts(preview,config.fonts,'no-base-preview');await journey(preview,'no-base-preview');
       const isolated=path.join(profile,'isolated-delivery');await fs.mkdir(isolated);const single=path.join(isolated,'page.html');await fs.copyFile(html,single);
       check=await inspect(preview,'isolated-file');await preview.goto(pathToFileURL(single).href,{waitUntil:'load'});await check.finish();
-      await preview.screenshot({path:path.join(out,'isolated-render.png'),fullPage:config.captureFullPage??false,animations:'disabled'});await preview.close();
-    }else report.checks.push({scenario:'standalone-portability',status:'not_applicable',note:'Folder mode does not establish single-file portability; verify the unpacked directory'});
+      await preview.screenshot({path:path.join(out,'isolated-render.png'),fullPage:config.captureFullPage??false,animations:'disabled'});
+      await checkFonts(preview,config.fonts,'isolated-file');await journey(preview,'isolated-file');await preview.close();
+    }else report.checks.push({scenario:'standalone-portability',status:'not_applicable',note:'Verify the unpacked directory; folder mode does not establish single-file portability'});
     report.status=report.failures.length?'failed':'automated_checks_passed';
     return report;
   }catch(error){report.status='blocked';report.failures.push({kind:'execution',error:String(error)});return report;}

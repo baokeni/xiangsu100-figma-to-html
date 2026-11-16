@@ -1,6 +1,6 @@
 interface:
   display_name: "像素100 · Figma 还原 HTML"
-  short_description: "从 Figma 还原可交互 HTML，自动检查素材、字体与细线，并先截图对照再交付"
-  default_prompt: "使用 $xiangsu100-figma-to-html 将这个 Figma 画板还原为 HTML，完成素材、字体、细线检查和同尺寸截图对照后再交付。"
+  short_description: "从 Figma 页面或原型链路还原 HTML，检查素材、字体和细线，完成叠图与交互验证"
+  default_prompt: "使用 $xiangsu100-figma-to-html 将这个 Figma Frame、Section 或 Prototype 链路还原为 HTML，逐页检查素材、字体和细线，完成同尺寸50%叠图、差异修正和交互链路验证后再交付。"
 policy:
   allow_implicit_invocation: true

@@ -25,6 +25,7 @@ def compare(reference, render, output, untagged='srgb'):
         raise ValueError(f'Pixel grids differ: {a.size} vs {b.size}; fix viewport/DPR/export scale, do not auto-resize')
     out = Path(output); out.mkdir(parents=True, exist_ok=True)
     difference = ImageChops.difference(a, b)
+    Image.blend(a, b, 0.5).save(out / 'overlay-50.png')
     difference.save(out / 'difference.png')
     ImageEnhance.Brightness(difference).enhance(4).save(out / 'difference-x4.png')
     width, height = a.size
@@ -32,6 +33,7 @@ def compare(reference, render, output, untagged='srgb'):
     draw = ImageDraw.Draw(sheet); draw.text((4, 5), 'Figma reference (sRGB)', fill='black'); draw.text((width + 4, 5), 'HTML render (sRGB)', fill='black')
     sheet.paste(a, (0,24)); sheet.paste(b, (width,24)); sheet.save(out / 'side-by-side.png')
     report = {'status':'diagnostics_only', 'requiresVisualReview':True, 'size':list(a.size), 'profiles':{'reference':ap,'render':bp},
+              'overlay':{'file':'overlay-50.png','referenceWeight':0.5,'renderWeight':0.5,'space':'sRGB encoded RGB'},
               'meanAbsoluteChannelDifference':sum(ImageStat.Stat(difference).mean)/3, 'channelRange':255,
               'pixelDifferenceBounds':difference.getbbox(), 'note':'Not a fidelity percentage, acceptance result, or proof of 1:1. Inspect local regions and interactions.'}
     (out / 'comparison.json').write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8')

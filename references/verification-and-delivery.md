@@ -34,7 +34,7 @@ npx playwright install chromium
 
 字体检查默认要求该选择器下实际绘制的所有字体符合期望。若文字本来混排，拆成各字体范围检查；只有有意允许后备字形时才设置`allowFallback:true`。不用泛化选择器覆盖整个页面并只检查出现过一个目标字体。
 
-交互的`expect.text`会去除首尾空白后完整匹配，不做子串放行；状态默认等待最多5秒，可在该动作设置`timeoutMs`。选择器须指向唯一目标。
+交互的`expect.text`会去除首尾空白后完整匹配，不做子串放行；状态默认等待最多5秒，可在该动作设置`timeoutMs`。选择器须指向唯一目标。每一步失败即停止该条路径，不能把后续状态记为已走到。
 
 ```bash
 node scripts/verify_delivery.mjs --html ./project/standalone.html --reference ./project/figma.png --width 393 --height 852 --out ./project/verification --mode standalone --config ./project/checks.json
@@ -44,10 +44,33 @@ node scripts/verify_delivery.mjs --html ./project/standalone.html --reference ./
 - 默认截取画板视口；需要完整长页且原稿覆盖相同范围时，在配置设置`captureFullPage:true`。PNG原稿与当前截图像素网格不同时会报错，不自动缩放。
 - 脚本从`--project`或HTML所属项目解析Playwright，不含本机绝对模块路径。
 - 检查img解码、网络/CSS/字体加载失败、JS异常、文档溢出、配置的实际字体与交互。
-- standalone模式额外把HTML单独复制到空目录，并在无目录基址下预览；folder模式不能证明单文件兼容，需自行核对实际解压目录。
+- standalone模式额外把HTML单独复制到空目录，并在无目录基址下预览；三种场景都会重放配置的整条交互路径。folder模式只验证指定目录中的入口与路径，需把实际解压后的入口传给脚本，不能证明单文件兼容。
 - 产出render.png、场景资源/几何JSON和automated-report.json。`automated_checks_passed`只代表自动检查通过，visualReview始终pending。
 - 字体未配置时会明确标注not_configured，必须补实际字体检查或说明缺口；不能借自动通过跳过Skill字体检查门。
-- CLI不是完整CSS语义解析器；懒加载、交互后资源和复杂应用须补场景验证，不能靠一个静态加载检查证明全应用正确。
+- 脚本检查每个已配置动作期间的加载错误及动作后的图片、横向溢出；仍不是完整CSS语义解析器。未走过的分支、延迟/悬停资源、背景素材的槽位、固定区和复杂应用须补场景验证。
+
+## 多页面/多状态检查配置
+
+先按 [intake-and-prototype.md](intake-and-prototype.md) 建立页面与关系清单。脚本执行配置，不自动读取连线，也不自动证明全部分支覆盖。每个独立起点/分支使用独立配置与输出目录，勿依赖上一轮浏览器状态。
+
+动作支持`click`、`press`（传key）与`scroll`（对selector指向的滚动元素设置top/left）。`expect`可为对象或对象数组：
+
+```json
+{
+  "interactions": [
+    { "name": "打开筛选", "action": "click", "selector": "#filter", "expect": { "selector": "#filter-dialog" }, "checkpoint": { "name": "filter-open", "reference": "references/filter-scene.png" } },
+    { "name": "取消筛选", "action": "click", "selector": "#cancel", "expect": { "selector": "#filter-dialog", "visible": false } },
+    { "name": "进入详情", "action": "click", "selector": "#item-1", "expect": { "selector": "#detail-title", "text": "详情", "urlHash": "#detail" }, "checkpoint": { "name": "detail" } },
+    { "name": "返回来源", "action": "click", "selector": "#back", "expect": [{ "selector": "#results", "scrollTop": 120, "urlHash": "#list" }, { "selector": "#filter-label", "text": "已筛选" }], "checkpoint": { "name": "return" } }
+  ]
+}
+```
+
+这是格式示例，不是一套可直接套用的链路；120也必须换成实际准备和预期值。按项目补上滚动/筛选准备动作。`urlHash`精确匹配，`urlIncludes`适合不同目录基址下的普通HTML路由。`visible:false`检查弹层关闭；`scrollTop/scrollLeft`允许1 CSS px误差。每步可用`fonts`声明当前状态的实际字体期望，格式与初始`fonts`一致；初始字体通过不代表未检查的后续页面也通过。
+
+`checkpoint.name`只能含字母、数字、下划线和短横线。产出带打开场景/步骤编号的PNG；可选`reference`路径相对配置文件，脚本只核对像素尺寸，仍需逐张运行比较工具、看图修正。初始render.png始终是交互前截图。没有reference或fonts的状态不能说已完成该状态的原稿/字体对照。
+
+每个运行实例使用固定width/height；设计中各页尺寸不同，应另以对应视口执行该页检查，链路本身再按目标演示视口验证。截图模式默认视口，长页全页截图不能代替固定导航、吸底区域与局部滚动行为检查。
 
 ## 同尺寸视觉复查
 
@@ -55,16 +78,21 @@ node scripts/verify_delivery.mjs --html ./project/standalone.html --reference ./
 python3 scripts/compare_screenshots.py ./project/figma.png ./project/verification/render.png --out ./project/verification/comparison
 ```
 
-输出同色彩空间的并排、差异、放大差异图。代理必须实际打开图像，查看全页以及文字、图片、细线密集的局部；数值仅诊断，不自动判断通过，不输出“还原率”。不同尺寸直接停止，不自动拉伸。
+输出`overlay-50.png`（原稿与网页各占50%）、`difference.png`、`difference-x4.png`和`side-by-side.png`。先统一到sRGB并对齐像素网格，不移动、拉伸或模糊图像来压低差异。透明小图应与同范围/同背景的截图比较，必要时先按可复现规则合成背景并保留原文件。
+
+代理必须实际打开原稿、网页、叠图和增强差异图，检查明显双影、错位、尺寸差异和密集局部。按“大区块尺寸 → 间距 → 文本基线与换行 → 图片/图标/层级 → 圆角、颜色、阴影”的顺序修正一轮；还要核实真实字体、SVG原始来源、横向溢出、固定区和滚动区。查看SVG存在不等于已确认来源节点及槽位正确。
+
+修正后生成第二轮当前网页截图、50%叠图和增强差异图，再检查受影响区域。分别用`round-1`、`round-2`等目录保存证据，报告必须指向最终版本。首轮无可修问题时记录检查结果，不为凑轮次伪造修改；仍有明确错误应继续修正或说明阻塞。不得交付旧截图掩盖新代码。数值仅诊断，不输出“还原率”。不同尺寸直接停止，不自动拉伸。
 
 ## 交付记录的最小内容
 
 ```text
-来源：目标画板/版本，原稿截图和尺寸。
+来源：Frame/Section、版本、Flow起点；所有目标页面/状态清单与原稿尺寸。
 实现：入口、打开方式、可编辑源稿、实际素材和字体。
-已检查：机器检查项目与结果、真实运行的交互、AI实际查看的截图。
+已检查：机器检查结果、逐页/状态视觉对照、实际走过的每条链路及返回状态。
+证据：各状态的Figma原图、当前网页截图、50%叠图、增强差异图、最终轮次。
 已修正：本轮具体差异与证据。
-仍有差异：位置/原因、未验证状态和设备范围。
+仍有差异：位置/原因、未实现页面/动作、未测试分支/字体/动效与设备范围。
 状态：自动检查 / AI视觉复查 / 用户验收分别填写。
 ```
 

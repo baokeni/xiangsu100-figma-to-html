@@ -72,6 +72,17 @@ class FontTests(unittest.TestCase):
         self.assertIn('Demo Family',row['names']['1']);self.assertEqual(row['weightClass'],500);self.assertEqual(row['embeddingFlags'],4)
 
 class CompareTests(unittest.TestCase):
+    def test_overlay_uses_equal_weights_without_resizing(self):
+        from PIL import Image
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);a=root/'a.png';b=root/'b.png'
+            Image.new('RGB',(3,2),(0,40,100)).save(a);Image.new('RGB',(3,2),(200,80,0)).save(b)
+            report=compare.compare(a,b,root/'out')
+            with Image.open(root/'out/overlay-50.png') as overlay:
+                self.assertEqual(overlay.size,(3,2));self.assertEqual(overlay.getpixel((0,0)),(100,60,50))
+            self.assertEqual(report['overlay']['referenceWeight'],0.5)
+            with Image.open(a) as original:self.assertEqual(original.getpixel((0,0)),(0,40,100))
+
     def test_color_profile_and_dimensions_are_not_ignored(self):
         try:from PIL import Image,ImageCms
         except ImportError:self.skipTest('Pillow is not installed')

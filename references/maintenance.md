@@ -22,7 +22,7 @@ node --check scripts/verify_delivery.mjs
 node tests/browser_regression.mjs --channel chrome
 ```
 
-macOS仍遵守宿主的浏览器启动权限规则。脚本不复用日常profile。集成回归使用合成素材，验证正常包、丢图和后备字体是否正确判定，不把这些结果当成真实Figma还原或学生使用效果。
+macOS仍遵守宿主的浏览器启动权限规则。脚本不复用日常profile。集成回归使用合成素材，验证正常包、丢图、后备字体、叠图权重、三种打开方式下的多状态链路、错误返回与跳转后资源是否正确判定，不把这些结果当成真实Figma还原或学生使用效果。
 
 仓库当前未启用GitHub Actions。需要CI的维护者可参考[检查配置示例](ci-checks.example.yml)，在有相应仓库权限时自行配置；示例文件本身不会执行工作流。
 
